@@ -325,6 +325,22 @@ class UnifiedDataset(Dataset):
         padding_embed = torch.zeros_like(reference_embed)
         padding_embed.fill_(1e-8)
         return padding_embed
+
+    def _encode_texts(self, texts):
+        """Encode a list of texts with a batched fallback for the embedding model."""
+        if not texts:
+            return []
+
+        try:
+            encoded = self.flag_model.encode(texts)
+            encoded_array = np.asarray(encoded)
+
+            if encoded_array.ndim == 1:
+                encoded_array = np.expand_dims(encoded_array, axis=0)
+
+            return [torch.tensor(row, dtype=torch.float32) for row in encoded_array]
+        except Exception:
+            return [torch.tensor(self.flag_model.encode(text), dtype=torch.float32) for text in texts]
     
     def _process_schema(self, schema_info, default_embed):
         """Process schema information and generate embeddings"""
@@ -337,6 +353,17 @@ class UnifiedDataset(Dataset):
         
         tables = schema_info['tables']
         table_columns = schema_info.get('columns', {})
+        table_texts = []
+        column_text_groups = []
+
+        for table in tables[:self.max_tables]:
+            table_texts.append(f"Table: {table}")
+            columns = table_columns.get(table, [])
+            column_text_groups.append([
+                f"Column: {column} in {table}" for column in columns[:self.max_columns]
+            ])
+
+        table_embeddings = self._encode_texts(table_texts)
         
         table_embed_list = []
         column_embed_list = []
@@ -344,18 +371,14 @@ class UnifiedDataset(Dataset):
         column_mask = torch.zeros(self.max_tables, self.max_columns, dtype=torch.bool)
         
         for i, table in enumerate(tables[:self.max_tables]):
-            table_embed = torch.tensor(self.flag_model.encode(f"Table: {table}"), dtype=torch.float32)
+            table_embed = table_embeddings[i]
             table_embed_list.append(table_embed)
             table_mask[i] = True
             
-            columns = table_columns.get(table, [])
             table_column_embeds = []
+            column_embeddings = self._encode_texts(column_text_groups[i]) if i < len(column_text_groups) else []
             
-            for j, column in enumerate(columns[:self.max_columns]):
-                column_embed = torch.tensor(
-                    self.flag_model.encode(f"Column: {column} in {table}"), 
-                    dtype=torch.float32
-                )
+            for j, column_embed in enumerate(column_embeddings):
                 table_column_embeds.append(column_embed)
                 column_mask[i, j] = True
             
@@ -395,27 +418,35 @@ class UnifiedDataset(Dataset):
         
         print("Processing Stage 1 dataset...")
         for item in tqdm(data, desc="Encoding Stage 1 data"):
-            question = item['question']
-            sql = item['query']
-            schema = item.get('schema', {})
-            
-            question_embed = torch.tensor(flag_model.encode(question), dtype=torch.float32)
-            sql_embed = torch.tensor(flag_model.encode(sql), dtype=torch.float32)
-            
-            if torch.isnan(question_embed).any() or torch.isnan(sql_embed).any():
-                continue
-            
-            table_embeds, column_embeds, table_mask, column_mask = self._process_schema(schema, question_embed)
-            
-            self.questions.append(question)
-            self.sqls.append(sql)
-            self.schemas.append(schema)
-            self.question_embeds.append(question_embed)
-            self.sql_embeds.append(sql_embed)
-            self.table_embeds.append(table_embeds)
-            self.column_embeds.append(column_embeds)
-            self.table_masks.append(table_mask)
-            self.column_masks.append(column_mask)
+            self.questions.append(item['question'])
+            self.sqls.append(item['query'])
+            self.schemas.append(item.get('schema', {}))
+
+        # Stage 1 embeddings are generated lazily in __getitem__ to keep RAM usage low.
+
+    def _build_stage1_item(self, idx):
+        """Encode a single Stage 1 sample on demand."""
+        question = self.questions[idx]
+        sql = self.sqls[idx]
+        schema = self.schemas[idx]
+
+        question_embed, sql_embed = self._encode_texts([question, sql])
+
+        if torch.isnan(question_embed).any() or torch.isnan(sql_embed).any():
+            raise ValueError("Invalid embedding generated for Stage 1 sample")
+
+        table_embeds, column_embeds, table_mask, column_mask = self._process_schema(schema, question_embed)
+
+        return {
+            'question_embed': question_embed,
+            'table_embeds': table_embeds,
+            'column_embeds': column_embeds,
+            'sql_embed': sql_embed,
+            'table_masks': table_mask,
+            'column_masks': column_mask,
+            'question': question,
+            'sql': sql
+        }
     
     def _process_stage2_data(self, data_file, flag_model):
         """Process data for Stage 2 training"""
@@ -427,117 +458,98 @@ class UnifiedDataset(Dataset):
         self.questions = []
         self.sqls = []
         self.schemas = []
-        self.question_embeds = []
-        self.sql_embeds = []
-        self.table_embeds = []
-        self.column_embeds = []
-        self.table_masks = []
-        self.column_masks = []
-        self.schema_aware_embeds = []
         self.similar_questions = []
         self.similar_sqls = []
         self.similar_schemas = []
-        self.similar_question_embeds = []
-        self.similar_sql_embeds = []
-        self.similar_schema_aware_embeds = []
         
         print("Processing Stage 2 dataset...")
         for item in tqdm(data, desc="Encoding Stage 2 data"):
-            main_question = item['question']
-            main_sql = item['query']
-            main_schema = item.get('schema', {})
-            
-            main_question_embed = torch.tensor(flag_model.encode(main_question), dtype=torch.float32)
-            main_sql_embed = torch.tensor(flag_model.encode(main_sql), dtype=torch.float32)
-            
-            main_table_embeds, main_column_embeds, main_table_mask, main_column_mask = self._process_schema(main_schema, main_question_embed)
-            
-            self.questions.append(main_question)
-            self.sqls.append(main_sql)
-            self.schemas.append(main_schema)
-            self.question_embeds.append(main_question_embed)
-            self.sql_embeds.append(main_sql_embed)
-            self.table_embeds.append(main_table_embeds)
-            self.column_embeds.append(main_column_embeds)
-            self.table_masks.append(main_table_mask)
-            self.column_masks.append(main_column_mask)
-            
-            # Generate schema-aware embedding using Stage 1 model
+            self.questions.append(item['question'])
+            self.sqls.append(item['query'])
+            self.schemas.append(item.get('schema', {}))
+            self.similar_questions.append([sim_item['question'] for sim_item in item.get('similar', [])])
+            self.similar_sqls.append([sim_item['query'] for sim_item in item.get('similar', [])])
+            self.similar_schemas.append([
+                sim_item.get('schema', item.get('schema', {})) for sim_item in item.get('similar', [])
+            ])
+
+        # Stage 2 embeddings are generated lazily in __getitem__ to keep RAM usage low.
+
+    def _build_stage2_item(self, idx):
+        """Encode a single Stage 2 sample on demand."""
+        main_question = self.questions[idx]
+        main_sql = self.sqls[idx]
+        main_schema = self.schemas[idx]
+
+        main_question_embed, main_sql_embed = self._encode_texts([main_question, main_sql])
+        main_table_embeds, main_column_embeds, main_table_mask, main_column_mask = self._process_schema(main_schema, main_question_embed)
+
+        if self.stage1_model is not None:
+            with torch.no_grad():
+                question_batch = main_question_embed.unsqueeze(0).to(self.device)
+                table_batch = main_table_embeds.unsqueeze(0).to(self.device)
+                column_batch = main_column_embeds.unsqueeze(0).to(self.device)
+                table_mask_batch = main_table_mask.unsqueeze(0).to(self.device)
+                column_mask_batch = main_column_mask.unsqueeze(0).to(self.device)
+
+                schema_aware_embed, _ = self.stage1_model(
+                    question_batch, table_batch, column_batch,
+                    table_mask_batch, column_mask_batch
+                )
+                schema_aware_embed = schema_aware_embed.squeeze(0).cpu()
+        else:
+            schema_aware_embed = main_question_embed
+
+        similar_questions = self._pad_or_truncate_list(self.similar_questions[idx], main_question, self.max_similar)
+        similar_sqls = self._pad_or_truncate_list(self.similar_sqls[idx], main_sql, self.max_similar)
+        similar_schemas = self._pad_or_truncate_list(self.similar_schemas[idx], main_schema, self.max_similar)
+
+        similar_question_embeds = []
+        similar_sql_embeds = []
+        similar_schema_aware_embeds = []
+
+        for sim_question, sim_sql, sim_schema in zip(similar_questions, similar_sqls, similar_schemas):
+            sim_question_embed, sim_sql_embed = self._encode_texts([sim_question, sim_sql])
+            similar_question_embeds.append(sim_question_embed)
+            similar_sql_embeds.append(sim_sql_embed)
+
             if self.stage1_model is not None:
+                sim_table_embeds, sim_column_embeds, sim_table_mask, sim_column_mask = self._process_schema(sim_schema, sim_question_embed)
                 with torch.no_grad():
-                    question_batch = main_question_embed.unsqueeze(0).to(self.device)
-                    table_batch = main_table_embeds.unsqueeze(0).to(self.device)
-                    column_batch = main_column_embeds.unsqueeze(0).to(self.device)
-                    table_mask_batch = main_table_mask.unsqueeze(0).to(self.device)
-                    column_mask_batch = main_column_mask.unsqueeze(0).to(self.device)
-                    
-                    schema_aware_embed, _ = self.stage1_model(
-                        question_batch, table_batch, column_batch, 
-                        table_mask_batch, column_mask_batch
+                    sim_question_batch = sim_question_embed.unsqueeze(0).to(self.device)
+                    sim_table_batch = sim_table_embeds.unsqueeze(0).to(self.device)
+                    sim_column_batch = sim_column_embeds.unsqueeze(0).to(self.device)
+                    sim_table_mask_batch = sim_table_mask.unsqueeze(0).to(self.device)
+                    sim_column_mask_batch = sim_column_mask.unsqueeze(0).to(self.device)
+
+                    sim_schema_aware_embed, _ = self.stage1_model(
+                        sim_question_batch, sim_table_batch, sim_column_batch,
+                        sim_table_mask_batch, sim_column_mask_batch
                     )
-                    schema_aware_embed = schema_aware_embed.squeeze(0).cpu()
+                    sim_schema_aware_embed = sim_schema_aware_embed.squeeze(0).cpu()
             else:
-                schema_aware_embed = main_question_embed
-            
-            self.schema_aware_embeds.append(schema_aware_embed)
-            
-            # Process similar samples
-            similar_questions = []
-            similar_sqls = []
-            similar_schemas = []
-            similar_question_embeds = []
-            similar_sql_embeds = []
-            similar_schema_aware_embeds = []
-            
-            for sim_item in item.get('similar', []):
-                sim_question = sim_item['question']
-                sim_sql = sim_item['query']
-                sim_schema = sim_item.get('schema', main_schema)
-                
-                sim_question_embed = torch.tensor(flag_model.encode(sim_question), dtype=torch.float32)
-                sim_sql_embed = torch.tensor(flag_model.encode(sim_sql), dtype=torch.float32)
-                
-                similar_questions.append(sim_question)
-                similar_sqls.append(sim_sql)
-                similar_schemas.append(sim_schema)
-                similar_question_embeds.append(sim_question_embed)
-                similar_sql_embeds.append(sim_sql_embed)
-                
-                # Generate schema-aware embedding for similar sample
-                if self.stage1_model is not None:
-                    sim_table_embeds, sim_column_embeds, sim_table_mask, sim_column_mask = self._process_schema(sim_schema, sim_question_embed)
-                    
-                    with torch.no_grad():
-                        sim_question_batch = sim_question_embed.unsqueeze(0).to(self.device)
-                        sim_table_batch = sim_table_embeds.unsqueeze(0).to(self.device)
-                        sim_column_batch = sim_column_embeds.unsqueeze(0).to(self.device)
-                        sim_table_mask_batch = sim_table_mask.unsqueeze(0).to(self.device)
-                        sim_column_mask_batch = sim_column_mask.unsqueeze(0).to(self.device)
-                        
-                        sim_schema_aware_embed, _ = self.stage1_model(
-                            sim_question_batch, sim_table_batch, sim_column_batch,
-                            sim_table_mask_batch, sim_column_mask_batch
-                        )
-                        sim_schema_aware_embed = sim_schema_aware_embed.squeeze(0).cpu()
-                else:
-                    sim_schema_aware_embed = sim_question_embed
-                
-                similar_schema_aware_embeds.append(sim_schema_aware_embed)
-            
-            # Pad/truncate to max_similar
-            similar_questions = self._pad_or_truncate_list(similar_questions, main_question, self.max_similar)
-            similar_sqls = self._pad_or_truncate_list(similar_sqls, main_sql, self.max_similar)
-            similar_schemas = self._pad_or_truncate_list(similar_schemas, main_schema, self.max_similar)
-            similar_question_embeds = self._pad_or_truncate_tensors(similar_question_embeds, main_question_embed, self.max_similar)
-            similar_sql_embeds = self._pad_or_truncate_tensors(similar_sql_embeds, main_sql_embed, self.max_similar)
-            similar_schema_aware_embeds = self._pad_or_truncate_tensors(similar_schema_aware_embeds, schema_aware_embed, self.max_similar)
-            
-            self.similar_questions.append(similar_questions)
-            self.similar_sqls.append(similar_sqls)
-            self.similar_schemas.append(similar_schemas)
-            self.similar_question_embeds.append(torch.stack(similar_question_embeds))
-            self.similar_sql_embeds.append(torch.stack(similar_sql_embeds))
-            self.similar_schema_aware_embeds.append(torch.stack(similar_schema_aware_embeds))
+                sim_schema_aware_embed = sim_question_embed
+
+            similar_schema_aware_embeds.append(sim_schema_aware_embed)
+
+        similar_question_embeds = self._pad_or_truncate_tensors(similar_question_embeds, main_question_embed, self.max_similar)
+        similar_sql_embeds = self._pad_or_truncate_tensors(similar_sql_embeds, main_sql_embed, self.max_similar)
+        similar_schema_aware_embeds = self._pad_or_truncate_tensors(similar_schema_aware_embeds, schema_aware_embed, self.max_similar)
+
+        return {
+            'question_embed': main_question_embed,
+            'schema_aware_embed': schema_aware_embed,
+            'sql_embed': main_sql_embed,
+            'similar_question_embeds': torch.stack(similar_question_embeds),
+            'similar_schema_aware_embeds': torch.stack(similar_schema_aware_embeds),
+            'similar_sql_embeds': torch.stack(similar_sql_embeds),
+            'question': main_question,
+            'sql': main_sql,
+            'schema': main_schema,
+            'similar_questions': similar_questions,
+            'similar_sqls': similar_sqls,
+            'similar_schemas': similar_schemas
+        }
     
     def _pad_or_truncate_list(self, lst, default_item, target_size):
         """Pad or truncate list to target size"""
@@ -566,16 +578,13 @@ class UnifiedDataset(Dataset):
     def save_embeddings(self, save_path):
         """Save embeddings to file"""
         embeddings = {}
-        for attr in ['questions', 'sqls', 'schemas', 'question_embeds', 'sql_embeds', 
-                     'table_embeds', 'column_embeds', 'table_masks', 'column_masks']:
+        for attr in ['questions', 'sqls', 'schemas']:
             if hasattr(self, attr):
                 embeddings[attr] = getattr(self, attr)
         
         # Stage 2 specific attributes
         if self.stage == 2:
-            for attr in ['schema_aware_embeds', 'similar_questions', 'similar_sqls', 
-                        'similar_schemas', 'similar_question_embeds', 'similar_sql_embeds',
-                        'similar_schema_aware_embeds']:
+            for attr in ['similar_questions', 'similar_sqls', 'similar_schemas']:
                 if hasattr(self, attr):
                     embeddings[attr] = getattr(self, attr)
         
@@ -588,31 +597,9 @@ class UnifiedDataset(Dataset):
     
     def __getitem__(self, idx):
         if self.stage == 1:
-            return {
-                'question_embed': self.question_embeds[idx],
-                'table_embeds': self.table_embeds[idx],
-                'column_embeds': self.column_embeds[idx],
-                'sql_embed': self.sql_embeds[idx],
-                'table_masks': self.table_masks[idx],
-                'column_masks': self.column_masks[idx],
-                'question': self.questions[idx],
-                'sql': self.sqls[idx]
-            }
+            return self._build_stage1_item(idx)
         else:  # Stage 2
-            return {
-                'question_embed': self.question_embeds[idx],
-                'schema_aware_embed': self.schema_aware_embeds[idx],
-                'sql_embed': self.sql_embeds[idx],
-                'similar_question_embeds': self.similar_question_embeds[idx],
-                'similar_schema_aware_embeds': self.similar_schema_aware_embeds[idx],
-                'similar_sql_embeds': self.similar_sql_embeds[idx],
-                'question': self.questions[idx],
-                'sql': self.sqls[idx],
-                'schema': self.schemas[idx],
-                'similar_questions': self.similar_questions[idx],
-                'similar_sqls': self.similar_sqls[idx],
-                'similar_schemas': self.similar_schemas[idx]
-            }
+            return self._build_stage2_item(idx)
 
 
 class UnifiedTrainer:
@@ -1134,6 +1121,17 @@ def train_unified_pipeline(config):
     # Load flag model
     logger.info(f"Loading embedding model from {config.flag_model_path}")
     flag_model = FlagModel(config.flag_model_path, use_fp16=True)
+    if torch.cuda.is_available():
+        try:
+            if hasattr(flag_model, "to"):
+                flag_model = flag_model.to("cuda")
+            elif hasattr(flag_model, "cuda"):
+                flag_model = flag_model.cuda()
+            logger.info("Moved FlagModel to CUDA")
+        except Exception as e:
+            logger.warning(f"Could not move FlagModel to CUDA: {e}")
+    else:
+        logger.warning("CUDA is not available; FlagModel will stay on CPU")
     
     # Initialize models
     stage1_model = SchemaAwareModel(
@@ -1179,20 +1177,15 @@ def train_unified_pipeline(config):
     logger.info("STAGE 1: Schema-Aware Representation Learning")
     logger.info("="*50)
     
-    # Load or create Stage 1 dataset
-    if os.path.exists(config.stage1_embeddings):
-        logger.info(f"Loading Stage 1 embeddings from {config.stage1_embeddings}")
-        stage1_dataset = UnifiedDataset(embeddings_file=config.stage1_embeddings, stage=1)
-    else:
-        logger.info(f"Creating Stage 1 dataset from {config.stage1_data}")
-        stage1_dataset = UnifiedDataset(
-            stage1_data_file=config.stage1_data,
-            flag_model=flag_model,
-            max_tables=config.max_tables,
-            max_columns=config.max_columns,
-            stage=1
-        )
-        stage1_dataset.save_embeddings(config.stage1_embeddings)
+    # Stage 1 uses lazy encoding to avoid holding the full embedding set in RAM.
+    logger.info(f"Creating Stage 1 dataset from {config.stage1_data}")
+    stage1_dataset = UnifiedDataset(
+        stage1_data_file=config.stage1_data,
+        flag_model=flag_model,
+        max_tables=config.max_tables,
+        max_columns=config.max_columns,
+        stage=1
+    )
     
     # Split Stage 1 dataset
     train_size = int(0.9 * len(stage1_dataset))
@@ -1266,22 +1259,17 @@ def train_unified_pipeline(config):
     logger.info("="*50)
     
     # Load or create Stage 2 dataset
-    if os.path.exists(config.stage2_embeddings):
-        logger.info(f"Loading Stage 2 embeddings from {config.stage2_embeddings}")
-        stage2_dataset = UnifiedDataset(embeddings_file=config.stage2_embeddings, stage=2)
-    else:
-        logger.info(f"Creating Stage 2 dataset from {config.stage2_data}")
-        stage2_dataset = UnifiedDataset(
-            stage2_data_file=config.stage2_data,
-            flag_model=flag_model,
-            stage1_model=stage1_model,
-            device=device,
-            max_tables=config.max_tables,
-            max_columns=config.max_columns,
-            max_similar=config.max_similar,
-            stage=2
-        )
-        stage2_dataset.save_embeddings(config.stage2_embeddings)
+    logger.info(f"Creating Stage 2 dataset from {config.stage2_data}")
+    stage2_dataset = UnifiedDataset(
+        stage2_data_file=config.stage2_data,
+        flag_model=flag_model,
+        stage1_model=stage1_model,
+        device=device,
+        max_tables=config.max_tables,
+        max_columns=config.max_columns,
+        max_similar=config.max_similar,
+        stage=2
+    )
     
     # Split Stage 2 dataset
     train_size = int(0.9 * len(stage2_dataset))
@@ -1393,11 +1381,11 @@ class TrainingConfig:
     """Configuration class for training parameters"""
     def __init__(self):
         # Data paths
-        self.stage1_data = './mini_SA_200.json'
-        self.stage2_data = './mini_CL_200.json'
+        self.stage1_data = '/Users/suhasreddy/Downloads/URASE/data/train_SAR_SA.json'
+        self.stage2_data = '/Users/suhasreddy/Downloads/URASE/data/train_SAR_CL.json'
         self.stage1_embeddings = './embeddings/stage1_embeddings.pt'
         self.stage2_embeddings = './embeddings/stage2_embeddings.pt'
-        self.flag_model_path = './plm/embeddingmodl'
+        self.flag_model_path = 'BAAI/bge-large-en-v1.5'
         
         # Model save paths
         self.stage1_model_path = './SAR/models/best_schema_aware_model.pth'

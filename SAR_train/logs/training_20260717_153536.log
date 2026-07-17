@@ -1,0 +1,21 @@
+2026-07-17 15:35:36,959 - INFO - Starting unified training pipeline
+2026-07-17 15:35:36,959 - INFO - Using device: cpu
+2026-07-17 15:35:36,962 - INFO - Loading embedding model from BAAI/bge-large-en-v1.5
+2026-07-17 15:35:37,439 - INFO - HTTP Request: HEAD https://huggingface.co/BAAI/bge-large-en-v1.5/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+2026-07-17 15:35:37,441 - WARNING - Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-07-17 15:35:37,449 - INFO - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/BAAI/bge-large-en-v1.5/d4aa6901d3a41ba39fb536a557fa166f842b0e09/config.json "HTTP/1.1 200 OK"
+2026-07-17 15:35:37,673 - INFO - HTTP Request: HEAD https://huggingface.co/BAAI/bge-large-en-v1.5/resolve/main/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
+2026-07-17 15:35:37,688 - INFO - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/BAAI/bge-large-en-v1.5/d4aa6901d3a41ba39fb536a557fa166f842b0e09/tokenizer_config.json "HTTP/1.1 200 OK"
+2026-07-17 15:35:37,913 - INFO - HTTP Request: GET https://huggingface.co/api/models/BAAI/bge-large-en-v1.5/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+2026-07-17 15:35:38,176 - INFO - HTTP Request: GET https://huggingface.co/api/models/BAAI/bge-large-en-v1.5/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-07-17 15:35:38,445 - INFO - HTTP Request: HEAD https://huggingface.co/BAAI/bge-large-en-v1.5/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+2026-07-17 15:35:38,456 - INFO - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/BAAI/bge-large-en-v1.5/d4aa6901d3a41ba39fb536a557fa166f842b0e09/config.json "HTTP/1.1 200 OK"
+2026-07-17 15:35:38,715 - INFO - HTTP Request: HEAD https://huggingface.co/BAAI/bge-large-en-v1.5/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+2026-07-17 15:35:38,735 - INFO - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/BAAI/bge-large-en-v1.5/d4aa6901d3a41ba39fb536a557fa166f842b0e09/config.json "HTTP/1.1 200 OK"
+2026-07-17 15:35:41,254 - WARNING - CUDA is not available; FlagModel will stay on CPU
+2026-07-17 15:35:41,431 - INFO - Stage 1 model: 12599296 parameters
+2026-07-17 15:35:41,431 - INFO - Stage 2 model: 27297280 parameters
+2026-07-17 15:35:41,431 - INFO - ==================================================
+2026-07-17 15:35:41,431 - INFO - STAGE 1: Schema-Aware Representation Learning
+2026-07-17 15:35:41,432 - INFO - ==================================================
+2026-07-17 15:35:41,432 - INFO - Creating Stage 1 dataset from data/train_SAR_SA.json

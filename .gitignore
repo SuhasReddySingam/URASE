@@ -1,0 +1,6 @@
+/data/bird/
+/data/bird.zip
+/data/train_SAR_SA.json
+/data/train_SAR_CL.json
+/data/train_SchemaLinker_CoT.json
+/data/train_SchemaLinker_MTL.json
