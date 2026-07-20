@@ -36,6 +36,23 @@ def setup_logging(log_dir: str = "./logs"):
     return logging.getLogger(__name__)
 
 
+def resolve_training_device(preferred_device: str) -> torch.device:
+    """Resolve the best available training device, preferring MPS on Mac when requested or auto-selected."""
+    preferred_device = (preferred_device or "auto").lower()
+
+    if preferred_device == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        return torch.device("cpu")
+
+    if preferred_device == "cuda":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        return torch.device("cpu")
+
+    return torch.device("cpu")
+
+
 class SafeMultiheadAttention(nn.Module):
     """Safe version of MultiheadAttention that handles edge cases"""
     def __init__(self, embed_dim, num_heads, dropout=0.1):
@@ -1110,7 +1127,7 @@ def train_unified_pipeline(config):
     logger = setup_logging(config.log_dir)
     logger.info("Starting unified training pipeline")
     
-    device = torch.device(config.device if torch.cuda.is_available() else 'cpu')
+    device = resolve_training_device(config.device)
     logger.info(f"Using device: {device}")
     
     # Set random seeds
@@ -1120,18 +1137,15 @@ def train_unified_pipeline(config):
     
     # Load flag model
     logger.info(f"Loading embedding model from {config.flag_model_path}")
-    flag_model = FlagModel(config.flag_model_path, use_fp16=True)
-    if torch.cuda.is_available():
-        try:
-            if hasattr(flag_model, "to"):
-                flag_model = flag_model.to("cuda")
-            elif hasattr(flag_model, "cuda"):
-                flag_model = flag_model.cuda()
-            logger.info("Moved FlagModel to CUDA")
-        except Exception as e:
-            logger.warning(f"Could not move FlagModel to CUDA: {e}")
-    else:
-        logger.warning("CUDA is not available; FlagModel will stay on CPU")
+    flag_model = FlagModel(config.flag_model_path, use_fp16=(device.type != "mps"))
+    try:
+        if hasattr(flag_model, "to"):
+            flag_model = flag_model.to(device)
+        elif device.type == "cuda" and hasattr(flag_model, "cuda"):
+            flag_model = flag_model.cuda()
+        logger.info(f"Moved FlagModel to {device}")
+    except Exception as e:
+        logger.warning(f"Could not move FlagModel to {device}: {e}")
     
     # Initialize models
     stage1_model = SchemaAwareModel(
@@ -1417,7 +1431,7 @@ class TrainingConfig:
         self.patience = 5
         
         # System parameters
-        self.device = 'cuda'
+        self.device = 'auto'
         self.seed = 42
     
     def update_from_args(self, args):
@@ -1466,7 +1480,7 @@ def main():
     parser.add_argument('--patience', type=int, help='Early stopping patience')
     
     # System arguments
-    parser.add_argument('--device', type=str, choices=['cuda', 'cpu'], help='Device to use')
+    parser.add_argument('--device', type=str, choices=['auto','cuda', 'cpu'], help='Device to use')
     parser.add_argument('--seed', type=int, help='Random seed')
     parser.add_argument('--output_dir', type=str, help='Output directory for plots')
     parser.add_argument('--log_dir', type=str, help='Log directory')

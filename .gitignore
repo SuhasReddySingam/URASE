@@ -4,3 +4,7 @@
 /data/train_SAR_CL.json
 /data/train_SchemaLinker_CoT.json
 /data/train_SchemaLinker_MTL.json
+/SAR_train/SAR/models/best_contrastive_model_final.pth
+/SAR_train/SAR/models/best_contrastive_model.pth
+/SAR_train/SAR/models/best_schema_aware_model_final.pth
+/SAR_train/SAR/models/best_schema_aware_model.pth
